@@ -1,0 +1,99 @@
+import pandas as pd
+
+import requests
+
+from bs4 import BeautifulSoup
+
+import time
+
+
+
+# 1. 엑셀 파일 불러오기 (파일명은 본인의 파일명으로 수정하세요)
+
+df = pd.read_excel('medicine_list.xlsx')
+
+
+
+# 2. 상세 페이지 접속을 위한 기본 URL
+
+# 의약품안전나라 상세페이지 구조에 따라 품목기준코드를 붙여 호출합니다.
+
+base_url = "https://nedrug.mfds.go.kr/pbp/CCBBB01/getItemDetail?itemSeq="
+
+
+
+# 결과를 저장할 리스트
+
+manufacturer_list = []
+
+
+
+print("데이터 추출을 시작합니다. 총 건수:", len(df))
+
+
+
+for index, row in df.iterrows():
+
+    item_seq = str(row['품목기준코드'])  # 엑셀의 품목기준코드 컬럼명 확인 필수
+
+    original_entp = row['업체명']        # 엑셀의 업체명 컬럼명 확인 필수
+
+    
+
+    try:
+
+        # 상세 페이지 호출
+
+        response = requests.get(base_url + item_seq, timeout=10)
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        
+
+        # '위탁제조업체' 항목 찾기 (HTML 구조에 따라 선택자는 달라질 수 있음)
+
+        # 보통 th가 '위탁제조업체'인 td의 값을 가져옵니다.
+
+        target_th = soup.find('th', text='위탁제조업체')
+
+        consigned_entp = target_th.find_next_sibling('td').get_text(strip=True) if target_th else ""
+
+        
+
+        # 값이 비어있으면 직접생산으로 간주하여 원래 업체명 입력
+
+        if not consigned_entp:
+
+            manufacturer_list.append(original_entp)
+
+        else:
+
+            manufacturer_list.append(consigned_entp)
+
+            
+
+    except Exception as e:
+
+        print(f"Error at {item_seq}: {e}")
+
+        manufacturer_list.append("오류발생")
+
+
+
+    # 서버 부하 방지 및 차단 회피를 위한 짧은 휴식 (중요!)
+
+    if index % 100 == 0:
+
+        print(f"{index}번째 진행 중...")
+
+        time.sleep(0.5)
+
+
+
+# 3. 결과 저장
+
+df['최종제조원'] = manufacturer_list
+
+df.to_excel('medicine_list_updated.xlsx', index=False)
+
+print("작업이 완료되었습니다.")
