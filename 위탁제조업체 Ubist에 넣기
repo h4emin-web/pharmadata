@@ -1,103 +1,101 @@
 import pandas as pd
 from tqdm import tqdm
-import os
 import re
+import os
 from difflib import SequenceMatcher
 
 # --- 설정 구간 ---
 USER_NAME = '강해민' 
 PATH = f'C:/Users/{USER_NAME}/Desktop'
-FILE_10 = f'{PATH}/data10.xlsx'
-FILE_20 = f'{PATH}/data20.xlsx'
-SAVE_PATH = f'{PATH}/data10_최종업데이트.xlsx'
+FILE_10 = os.path.join(PATH, '10.xlsx')
+FILE_20 = os.path.join(PATH, 'data20.xlsx')
+SAVE_PATH = os.path.join(PATH, '10_최종결과_완성.xlsx')
 
-def final_normalize(text):
-    """이름에서 괄호 제거, 단위 통일, 공백 제거 (매칭의 기초)"""
+def super_normalize(text):
     if not isinstance(text, str): return ""
-    text = re.sub(r'\(.*?\)', '', text) # 괄호 제거
-    text = text.lower().replace('밀리그램', 'mg').replace('그램', 'g').replace('밀리리터', 'ml')
-    # 1.0mg -> 1mg 처럼 소수점 뒤 0 제거
-    text = text.replace('.0mg', 'mg').replace('.0g', 'g')
-    return re.sub(r'\s+', '', text) # 공백 제거
+    text = re.sub(r'\(.*?\)', '', text)
+    text = text.lower().replace('밀리리터', 'ml').replace('밀리그램', 'mg').replace('밀리그람', 'mg').replace('그램', 'g')
+    text = text.replace('.0mg', 'mg').replace('.0ml', 'ml')
+    text = re.sub(r'[^a-z0-9가-힣.]', '', text)
+    return text
 
-def extract_numbers(text):
-    """문자열에서 숫자만 추출 (1mg -> '1', 1.0mg -> '10' -> '1')"""
-    if not isinstance(text, str): return []
-    # 숫자를 찾되 1.0 같은 소수점 처리
-    nums = re.findall(r'\d+\.?\d*', text)
-    # 1.0 은 1로 변환해서 저장
-    clean_nums = []
-    for n in nums:
-        try:
-            val = float(n)
-            clean_nums.append(str(int(val)) if val == int(val) else str(val))
-        except: continue
-    return clean_nums
+def extract_all_numbers(text):
+    return re.findall(r'\d+\.?\d*', text)
+
+def get_similarity(a, b):
+    return SequenceMatcher(None, a, b).ratio()
 
 def main():
     if not os.path.exists(FILE_10) or not os.path.exists(FILE_20):
         print("❌ 파일을 찾을 수 없습니다.")
         return
 
-    print("📂 데이터를 불러오고 있습니다...")
-    df10 = pd.read_excel(FILE_10, header=1) 
-    df20 = pd.read_excel(FILE_20)
-
-    # 데이터 정돈
+    print("📊 데이터를 읽어오고 있습니다...")
+    # 1. 데이터 로드 후 즉시 빈 행 제거
+    df10 = pd.read_excel(FILE_10, header=1)
+    # '제품' 컬럼이 비어있는 행은 아예 삭제 (데이터 백만 개 방지 핵심)
     df10 = df10.dropna(subset=['제품']).reset_index(drop=True)
-    df20 = df20.dropna(subset=['제품']).reset_index(drop=True)
     
-    print("🔍 전방위 추론 엔진 가동 중...")
-    # data20 정규화 미리 해두기
+    df20 = pd.read_excel(FILE_20)
+    df20 = df20.dropna(subset=['제품']).reset_index(drop=True)
+
+    df10['제조원'] = ""
+
+    print("🔍 지식 베이스(data20) 최적화 중...")
     df20_list = []
     for _, row in df20.iterrows():
         raw_name = str(row['제품'])
-        norm = final_normalize(raw_name)
-        nums = extract_numbers(norm)
-        # 용량 단위 제외한 순수 한글 이름만 추출 (예: 라사원정)
-        pure_name = re.sub(r'[0-9.a-z]+', '', norm)
-        
-        row_dict = row.to_dict()
-        row_dict.update({'norm': norm, 'nums': nums, 'pure': pure_name})
-        df20_list.append(row_dict)
+        norm = super_normalize(raw_name)
+        nums = extract_all_numbers(norm)
+        df20_list.append({
+            'raw': row.to_dict(),
+            'norm': norm,
+            'nums': nums,
+            'seller': str(row.get('판매사', '')).strip(),
+            'vendor': str(row.get('제조원', row.get('제조사', ''))).strip()
+        })
 
-    print("🚀 초정밀 매칭 시작 (라사원, 사미온 등 모든 사례 대응)...")
+    print(f"🚀 전수 조사 시작 (현재 데이터: {len(df10)}건)...")
     for i in tqdm(range(len(df10))):
         name10 = str(df10.at[i, '제품'])
-        norm10 = final_normalize(name10)
-        nums10 = extract_numbers(norm10)
-        pure10 = re.sub(r'[0-9.a-z]+', '', norm10)
+        seller10 = str(df10.at[i, '판매사']).strip()
+        norm10 = super_normalize(name10)
+        nums10 = extract_all_numbers(norm10)
         
         best_match = None
-        
-        for row20 in df20_list:
-            # 1단계: 완전 일치 (띄어쓰기/괄호 무시 상태)
-            if norm10 == row20['norm']:
-                best_match = row20
-                break
+        max_score = 0
+
+        for item20 in df20_list:
+            norm20 = item20['norm']
+            nums20 = item20['nums']
+            seller20 = item20['seller']
+
+            # 용량 정밀 대조
+            if nums10 and nums20:
+                if set(nums10) != set(nums20): continue
             
-            # 2단계: 용량이 한쪽에만 있거나, 양쪽 숫자가 같은 경우
-            # '사미온정5mg' vs '사미온정' 처리
-            if pure10 == row20['pure']:
-                # 양쪽 다 숫자가 있으면 숫자가 같아야 함
-                if nums10 and row20['nums']:
-                    if nums10 == row20['nums']:
-                        best_match = row20
-                        break
-                # 한쪽에만 숫자가 있는 경우 (추론 허용)
-                else:
-                    best_match = row20
-                    break
+            text_score = get_similarity(norm10, norm20)
+            
+            seller_bonus = 0
+            if seller10 and seller20 and (seller10 in seller20 or seller20 in seller10):
+                seller_bonus = 0.4
+
+            current_score = text_score + seller_bonus
+
+            if current_score > max_score and current_score > 0.8:
+                max_score = current_score
+                best_match = item20
 
         if best_match:
-            df10.at[i, '위탁제조업체'] = best_match.get('위탁제조업체')
-            s20 = str(best_match.get('판매사', '')).strip()
-            if s20 and s20 != 'nan':
-                df10.at[i, '판매사'] = s20
+            df10.at[i, '제조원'] = best_match['vendor']
 
-    print("💾 결과 저장 중...")
+    # 마지막으로 한 번 더 빈칸 정리 (제조원 미매칭 시 '확인불가' 등으로 채우거나 빈칸 유지)
+    # 저장 전 모든 데이터의 앞뒤 공백 제거
+    df10 = df10.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+
+    # 결과 저장
     df10.to_excel(SAVE_PATH, index=False)
-    print(f"✅ 완료! 이제 말씀하신 모든 사례(라사원, 라질렌, 라사민, 사미온 등)가 매칭됩니다.")
+    print(f"\n✅ 완료! {len(df10)}개의 데이터가 정리되었습니다.")
 
 if __name__ == "__main__":
     main()
