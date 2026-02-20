@@ -1,0 +1,84 @@
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+import os
+import re
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# --- 설정 구간 ---
+MAX_WORKERS = 10  # 동시에 열 페이지 수 (컴퓨터 성능/인터넷에 따라 5~20 사이 조절)
+
+def fetch_data(item_seq):
+    """한 페이지를 읽어와서 약가와 영문명을 반환하는 함수"""
+    if not item_seq or item_seq == 'nan' or item_seq == "":
+        return "", ""
+
+    base_url = f"https://nedrug.mfds.go.kr/pbp/CCBBB01/getItemDetail?itemSeq={item_seq}"
+    try:
+        # 속도를 위해 timeout을 짧게 설정
+        response = requests.get(base_url, timeout=5)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        price_val = ""
+        atc_eng_name = ""
+
+        for th in soup.find_all('th'):
+            text = th.get_text()
+            if '보험약가' in text:
+                td = th.find_next_sibling('td')
+                if td:
+                    match = re.search(r'(\d+원)', td.get_text(strip=True))
+                    if match: price_val = match.group(1)
+            elif 'ATC코드' in text:
+                td = th.find_next_sibling('td')
+                if td:
+                    match = re.search(r'\((.*?)\)', td.get_text(strip=True))
+                    if match: atc_eng_name = match.group(1).strip()
+            
+            # 둘 다 찾았으면 일찍 종료
+            if price_val and atc_eng_name: break
+
+        return price_val, atc_eng_name
+    except:
+        return "오류", "오류"
+
+def main():
+    user_name = os.getlogin()
+    file_path = f'C:/Users/{user_name}/Desktop/data10000.xlsx'
+    save_path = f'C:/Users/{user_name}/Desktop/data10000_최종완성.xlsx'
+
+    if not os.path.exists(file_path):
+        print(f"❌ 파일을 찾을 수 없습니다.")
+        return
+
+    print("📂 데이터를 불러오고 있습니다...")
+    df = pd.read_excel(file_path)
+    item_seqs = [str(val).strip() for val in df.iloc[:, 0]]
+    total = len(item_seqs)
+
+    results = [None] * total
+
+    print(f"⚡ 멀티쓰레딩 가동 (동시 작업 수: {MAX_WORKERS})...")
+    
+    # 멀티쓰레드 실행
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # 작업 등록
+        future_to_index = {executor.submit(fetch_data, seq): i for i, seq in enumerate(item_seqs)}
+        
+        # 완료되는 순서대로 결과 기록 (tqdm으로 진행 바 표시)
+        for future in tqdm(as_completed(future_to_index), total=total, desc="초고속 추출 중"):
+            index = future_to_index[future]
+            results[index] = future.result()
+
+    # 결과 데이터를 엑셀에 채우기
+    print("\n✍️ 데이터를 엑셀에 기입 중...")
+    for i, (price, eng) in enumerate(results):
+        df.iloc[i, 5] = price  # F열
+        df.iloc[i, 7] = eng    # H열
+
+    df.to_excel(save_path, index=False)
+    print(f"✅ 작업 완료! 저장 위치: {save_path}")
+
+if __name__ == "__main__":
+    main()
